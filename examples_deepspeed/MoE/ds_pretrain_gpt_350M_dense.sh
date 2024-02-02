@@ -184,23 +184,6 @@ ACTIVATION_CHECKPOINT="true"
 ### Output and data configs
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")
 host="${HOSTNAME}"
-NAME="gpt-${MODEL_SIZE}B-lr-${LR}-minlr-${MIN_LR}-bs-${GLOBAL_BATCH_SIZE}-gpus-${NUM_GPUS}-mp-${MP_SIZE}-pp-${PP_SIZE}"
-if [[ $EP_SIZE -gt 1 ]]; then
-    NAME="${NAME}-ep-${EP_SIZE}-mlc-${MLC}-cap-${MOE_TRAIN_CAP_FACTOR}-drop-${MOE_DROP_TOKEN}"
-fi
-if [ "${CL_ENABLED}" = "true" ]; then
-    NAME="${NAME}-cl-${CL_START_SEQLEN}-${CL_STEP}"
-fi
-
-OUTPUT_BASEPATH=$DIR/output
-mkdir -p "${OUTPUT_BASEPATH}/tensorboard/"
-mkdir -p "${OUTPUT_BASEPATH}/checkpoint/"
-mkdir -p "${OUTPUT_BASEPATH}/log/"
-TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/${NAME}_${host}_${current_time}"
-mkdir -p ${TENSORBOARD_DIR} 
-## Note that for MoE model with billion-scale base model, the checkpoint can be
-## as large as TB-scale which normal NFS cannot handle efficiently.
-CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint/${NAME}"
 
 # USE_INTERNAL_DATA="true"
 USE_INTERNAL_DATA="false"
@@ -239,10 +222,9 @@ if [ "${USE_INTERNAL_DATA}" = "true" ]; then
     0.00208 ${NIH} 0.13017 ${CC2020} 0.09446 ${PCC} 0.15652 ${CC2021} \
     0.01359 ${ARX} 0.01588 ${GIT}"
 else
-    VOCAB_PATH=/data/the_pile_public_merged_nopreprocessing/gpt2-vocab.json
-    MERGE_PATH=/data/the_pile_public_merged_nopreprocessing/gpt2-merges.txt
-    # Public the Pile dataset, can be downloaded at https://mystic.the-eye.eu/public/AI/pile_neox/
-    DATA_BLEND=/data/the_pile_public_merged_nopreprocessing/pile_text_document
+    VOCAB_PATH=/home/sds/yueyk/gpt-data/gpt2-vocab.json
+    MERGE_PATH=/home/sds/yueyk/gpt-data/gpt2-merges.txt
+    DATA_BLEND=/home/sds/yueyk/gpt-data/meg-gpt2-oscar-en-10k_text_document
 fi
 ###############################################################################
 data_options=" \
@@ -288,13 +270,7 @@ megatron_options=" \
         --hysteresis 2 \
         --num-workers 0 \
         --fp16 \
-        --load ${CHECKPOINT_PATH} \
-        --save ${CHECKPOINT_PATH} \
-        --tensorboard-queue-size 1 \
-        --log-timers-to-tensorboard \
-        --log-batch-size-to-tensorboard \
-        --log-validation-ppl-to-tensorboard \
-        --tensorboard-dir ${TENSORBOARD_DIR}"
+        --cpu-optimizer"
 
 if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
 megatron_options="${megatron_options} \
@@ -311,13 +287,13 @@ megatron_options="${megatron_options} \
         --disable-moe-token-dropping"
 fi
 
-template_json="ds_config_gpt_TEMPLATE.json"
-config_json="ds_config_gpt_${NAME}.json"
+template_json="ds_config_gpt_Zero3_TEMPLATE.json"
+config_json="ds_config_gpt_350M_dense.json"
 sed "s/CONFIG_BATCH_SIZE/${GLOBAL_BATCH_SIZE}/" ${template_json} \
     | sed "s/CONFIG_MBSIZE/${BATCH_SIZE}/" \
     | sed "s/LOG_INTERVAL/${LOG_INTERVAL}/" \
-    | sed "s/ZERO_STAGE/0/" \
-    | sed "s/PRESCALE_GRAD/true/" \
+    | sed "s/ZERO_STAGE/3/" \
+    | sed "s/PRESCALE_GRAD/false/" \
     | sed "s/CONFIG_FP16_ENABLED/true/" \
     | sed "s/CONFIG_BF16_ENABLED/false/" \
     | sed "s/CONFIG_CL_ENABLED/${CL_ENABLED}/" \
@@ -329,10 +305,11 @@ sed "s/CONFIG_BATCH_SIZE/${GLOBAL_BATCH_SIZE}/" ${template_json} \
 deepspeed_options=" \
 		    --deepspeed \
 		    --deepspeed_config ${config_json} \
+                    --zero-stage 3 \
 		    --pipeline-model-parallel-size ${PP_SIZE}"
 
 # Currently MoE is not compatible with pipeline parallel
-if [[ $EP_SIZE -gt 1 ]]; then
+if [[ $EP_SIZE -gt 0 ]]; then
 deepspeed_options="${deepspeed_options} \
         --no-pipeline-parallel"
 fi
@@ -342,7 +319,7 @@ deepspeed_options="${deepspeed_options} \
         --deepspeed-activation-checkpointing"
 fi
 
-run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options} &> ${OUTPUT_BASEPATH}/log/${NAME}_${host}_${current_time}.log"
+run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options}"
 echo ${run_cmd}
 eval ${run_cmd}
 set +x

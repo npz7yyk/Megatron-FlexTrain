@@ -28,8 +28,30 @@ from torch import nn
 import torch.nn.functional as F
 
 
+def flextrain_model_provider(pre_process=True, post_process=True):
+    """Build the model for FlexTrain optimization."""
+
+    print_rank_0('building GPT model ...')
+    see_memory_usage(f"Before Building Model", force=True)
+    args = get_args()
+    config = core_transformer_config_from_args(args)
+    with deepspeed.flex.Init():
+        model = GPTModel(
+            config=config,
+            num_tokentypes=0,
+            parallel_output=True,
+            pre_process=pre_process,
+            post_process=post_process
+        )
+    see_memory_usage(f"After Building Model", force=True)
+    return model
+
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
+
+    if deepspeed.flex.is_configured():
+        return flextrain_model_provider(pre_process, post_process)
 
     print_rank_0('building GPT model ...')
     see_memory_usage(f"Before Building Model", force=True)

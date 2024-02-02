@@ -158,6 +158,9 @@ def pretrain(train_valid_test_dataset_provider,
         if "compression_training" in args.deepspeed_config_dict:
             args.compression_training = True
 
+    # Initialize FlexTrain
+    deepspeed.flex.initialize(args)
+
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(

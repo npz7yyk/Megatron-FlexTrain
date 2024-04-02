@@ -4,6 +4,7 @@ import contextlib
 from typing import Callable, Iterator, List, Optional, Union
 
 import torch
+import deepspeed
 from torch.autograd.variable import Variable
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
@@ -95,6 +96,8 @@ def get_forward_backward_func():
     collect_non_loss_data (optional, bool, default=False): TODO
 
     """
+    if deepspeed.flex.is_configured():
+        return forward_backward_flextrain
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
@@ -299,6 +302,49 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     return input_tensor_grad
 
 
+def forward_backward_flextrain(*,
+                               forward_step_func, # unused
+                               data_iterator: Union[Iterator, List[Iterator]],
+                               model: deepspeed.flex.FlexTrainOptimizer,
+                               num_microbatches: int, # unused
+                               seq_length: int, # unused
+                               micro_batch_size: int, # unused
+                               decoder_seq_length: int = None, # unused
+                               forward_only: bool = False,
+                               collect_non_loss_data: bool = False,
+                               ):
+    """
+    Run forward and backward passes with FlexTrain optimizations.
+
+    Returns dictionary with losses.
+
+    See get_forward_backward_func() for argument details
+    """
+
+    # Ensure FlexTrain is not in forward-only mode
+    assert not forward_only, "FlexTrain is a training framework."
+
+    # Unwrap model
+    if isinstance(model, list):
+        assert len(model) == 1, "FlexTrain only supports single model training"
+        model = model[0]
+
+    # temp test
+    deepspeed.runtime.flex.optimizer.test(model, data_iterator)
+
+    # Ensure model is wrapped by FlexTrain
+    assert isinstance(model, deepspeed.flex.FlexTrainOptimizer), \
+        "FlexTrain only supports FlexTrainOptimizer wrapped models"
+
+    # Run forward and backward passes
+    forward_data_store = []
+    return model.forbackwards(
+        data_iterator=data_iterator,
+        forward_data_store=forward_data_store,
+        collect_non_loss_data=collect_non_loss_data
+    )
+
+
 def forward_backward_no_pipelining(*,
                                    forward_step_func,
                                    data_iterator: Union[Iterator, List[Iterator]],
@@ -348,6 +394,7 @@ def forward_backward_no_pipelining(*,
         for i in range(num_microbatches - 1):
             output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                          input_tensor, forward_data_store, config, collect_non_loss_data)
+            print(output_tensor)
             if not forward_only:
                 backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config, model)
     if args.deepspeed:
@@ -357,6 +404,7 @@ def forward_backward_no_pipelining(*,
     # synchronize gradients).
     output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                  input_tensor, forward_data_store, config, collect_non_loss_data)
+    print(output_tensor)
 
     if not forward_only:
         backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config, model)

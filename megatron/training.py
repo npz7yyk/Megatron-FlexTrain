@@ -608,14 +608,18 @@ def setup_model_and_optimizer(model_provider_func,
             )
             model.set_data_post_process_func(data_post_process)
         else:
-            model, optimizer, _, opt_param_scheduler = deepspeed.initialize(
-                model=model[0],
-                optimizer=optimizer,
-                args=args,
-                lr_scheduler=opt_param_scheduler,
-                mpu=mpu if args.no_pipeline_parallel else None,
-                config=args.deepspeed_config_dict,
-            )
+            # TEMP avoid deepspeed.initialize() using flex.is_configured()
+            if deepspeed.flex.is_configured():
+                model = model[0]
+            else:
+                model, optimizer, _, opt_param_scheduler = deepspeed.initialize(
+                    model=model[0],
+                    optimizer=optimizer,
+                    args=args,
+                    lr_scheduler=opt_param_scheduler,
+                    mpu=mpu if args.no_pipeline_parallel else None,
+                    config=args.deepspeed_config_dict,
+                )
         if isinstance(model, deepspeed.PipelineEngine):
             # hack to get batch_fn from pretrain_gpt.py
             model.set_batch_fn(model.module._megatron_batch_fn)
@@ -1166,7 +1170,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     while iteration < args.train_iters and (args.train_tokens is None or \
         args.consumed_train_tokens < args.train_tokens):
         update_num_microbatches(args.consumed_train_samples)
-        if args.deepspeed:
+        if args.deepspeed and not deepspeed.flex.is_configured():
             # inform deepspeed of any batch size changes
             global_batch_size = mpu.get_data_parallel_world_size() * \
                                 args.micro_batch_size * \

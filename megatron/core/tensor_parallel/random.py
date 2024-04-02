@@ -195,6 +195,8 @@ def model_parallel_cuda_manual_seed(seed):
                               groups. This is used for example for dropout in
                               model parallel regions.
     """
+    if deepspeed.runtime.flex.is_configured():
+        return deepspeed.runtime.flex.data_parallel_cuda_manual_seed(seed)
     if deepspeed.checkpointing.is_configured():
         return deepspeed.checkpointing.model_parallel_cuda_manual_seed(seed)
     
@@ -323,8 +325,6 @@ class CheckpointFunction(torch.autograd.Function):
 def checkpoint(function, distribute_saved_activations, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
-    if deepspeed.flex.is_configured():
-        return deepspeed.flex.checkpoint(function, *args)
     if deepspeed.checkpointing.is_configured():
         return deepspeed.checkpointing.checkpoint(function, *args)
     

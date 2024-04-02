@@ -9,10 +9,10 @@ from megatron import get_args
 from megatron import print_rank_0
 from megatron import get_timers
 from megatron import get_tokenizer
-from megatron.core import mpu, tensor_parallel
+from megatron.core import mpu, tensor_parallel, utils
 from megatron.core.enums import ModelType
 from megatron.data.gpt_dataset import build_train_valid_test_datasets
-from megatron.model import GPTModel, GPTModelPipe
+from megatron.model.gpt_model import GPTModel, GPTModelPipe, post_language_model_processing
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group, update_rotary_pos_emb
@@ -20,6 +20,7 @@ from megatron.arguments import core_transformer_config_from_args
 
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.runtime.flex.optimizer import FlexTrainFuncPack
 from deepspeed.accelerator.real_accelerator import get_accelerator
 import os
 import subprocess
@@ -28,8 +29,202 @@ from torch import nn
 import torch.nn.functional as F
 
 
+def get_batch_func(data_iterator):
+    """
+    Get the batch from the data iterator.
+
+    Args:
+        data_iterator (Iterator): The data iterator
+
+    Returns:
+        Tuple: inputs for the model
+        Tuple: inputs directly passed to the post-process function
+        Tuple: inputs for the loss function
+    """
+
+    batch_data = get_batch(data_iterator)
+
+    assert isinstance(batch_data, tuple), f"Expected tuple, got {type(batch_data)}"
+    assert len(batch_data) == 5, f"Expected 5 inputs, got {len(batch_data)}"
+
+    # Model inputs: input_ids, position_ids, attention_mask
+    model_inputs = (batch_data[0], batch_data[4], batch_data[3])
+
+    # Post-process inputs: labels
+    post_inputs = (batch_data[1], )
+
+    # Loss function inputs: loss_mask
+    loss_inputs = (batch_data[2], )
+
+    return model_inputs, post_inputs, loss_inputs
+
+
+def pre_process_func(model: GPTModel, model_inputs):
+    """
+    Pre-process function for the model.
+    Note that token embedding is conducted within this function.
+
+    Args:
+        model (GPTModel): The model
+        model_inputs (Tuple): The input of the model
+
+    Returns:
+        Tuple: The intermediate needed to be passed down layer-by-layer
+        Tuple: The intermediate needed by each layer
+
+    @NOTE: Currently, only basic training is supported.
+    """
+
+    # Unpack the model inputs
+    input_ids, position_ids, attention_mask = model_inputs
+
+    # Please refer to the original forward function for the following code
+
+    # Embedding layer
+    encoder_input = model.language_model.embedding(input_ids, position_ids)
+
+    # Viewless tensor.
+    hidden_states = utils.make_viewless_tensor(
+        encoder_input,
+        requires_grad=True,
+        keep_graph=True,
+    )
+
+    return (hidden_states, []), (attention_mask,)
+
+
+def get_layer(model: GPTModel, index):
+    """
+    Get the layer at the given index.
+
+    Args:
+        model (GPTModel): The model
+        index (int): The index of the layer
+
+    Returns:
+        nn.Module: The layer at the given index
+    """
+    return model.language_model.encoder.layers[index]
+
+
+def custom_forward(model, start, end):
+    """
+    Forward function for a subset of layers from the model.
+
+    Args:
+        model (GPTModel): The model
+        start (int): The start index
+        end (int): The end index
+
+    Note:
+        Subset of layers is defined as [start, end)
+
+    Returns:
+        Callable: The forward function
+            Inputs: constructed as *passed_down, *inputs
+            Returns: passed_down (Tuple)
+    """
+
+    def forward(x, moe_losses, attention_mask):
+        for index in range(start, end):
+            layer = get_layer(model, index)
+            output = layer(x, attention_mask)
+            if isinstance(output, tuple):
+                x, moe_loss = output
+            else:
+                x = output
+                moe_loss = torch.tensor(
+                    0.0,
+                    device=x.device,
+                    dtype=x.dtype,
+                    requires_grad=True
+                )
+            moe_losses.append(moe_loss)
+        return (x, moe_losses)
+
+    return forward
+
+
+def post_process_func(model: GPTModel, passed_down, post_inputs):
+    """
+    Post-process function for the model.
+    Note: the output is exactly the same as the original forward.
+
+    Args:
+        model (GPTModel): The model
+        passed_down (Tuple): The results produced by the last layer
+        post_inputs (Tuple): The input of the post-process function
+
+    Returns:
+        Tuple: The output of the model
+
+    @NOTE: Currently, only basic training is supported.
+    """
+
+    # passed_down is the hidden_states and moe_losses
+    assert len(passed_down) == 2
+    hidden_states, moe_losses = passed_down
+
+    # post_inputs is the labels
+    assert len(post_inputs) == 1
+    labels = post_inputs[0]
+
+    # Final layer norm
+    hidden_states = model.language_model.encoder.final_layernorm(hidden_states)
+
+    # Conduct language model post-processing
+    lm_output = post_language_model_processing(
+        hidden_states, labels,
+        model.language_model.embedding.word_embeddings.weight,
+        model.parallel_output,
+        model.fp16_lm_cross_entropy
+    )
+
+    return lm_output, moe_losses
+
+
+def flextrain_loss_func(model_output, loss_inputs):
+    """
+    Loss func wrapper for FlexTrain.
+    Compute the training loss using model output and loss input.
+    Return the standard scalar loss and things to store.
+
+    Args:
+        model_output (Tuple): The output of the model
+        loss_inputs (Tuple): The input of the loss function
+
+    @NOTE: Currently, only basic training is supported.
+    """
+    
+    assert len(model_output) == 2, f"Expected 2 inputs, got {len(model_output)}"
+
+    args = get_args()
+
+    # Model output: output_tensor, other_losses
+    output_tensor, other_losses = model_output
+
+    # Model output kwargs: output_tensor
+    moe_losses = []
+    for moe_loss in other_losses:
+        if moe_loss is not None:
+            moe_losses.append(moe_loss)
+    moe_loss = sum(moe_losses) * args.moe_loss_coeff
+
+    # Loss function kwargs: mos_loss (mos not supported yet, a placeholder)
+    mos_loss = 0.0
+
+    # Loss inputs: loss_mask
+    loss_mask = loss_inputs[0]
+
+    # Return the loss
+    return loss_func(loss_mask, moe_loss, mos_loss, output_tensor)
+
+
 def flextrain_model_provider(pre_process=True, post_process=True):
     """Build the model for FlexTrain optimization."""
+
+    # FlexTrain requires both pre-process and post-process to be enabled
+    assert pre_process and post_process
 
     print_rank_0('building GPT model ...')
     see_memory_usage(f"Before Building Model", force=True)
@@ -43,6 +238,16 @@ def flextrain_model_provider(pre_process=True, post_process=True):
             pre_process=pre_process,
             post_process=post_process
         )
+    func_pack = FlexTrainFuncPack(
+        model=model,
+        get_layer_fn=get_layer,
+        get_batch_fn=get_batch_func,
+        pre_process_fn=pre_process_func,
+        forward_fn=custom_forward,
+        post_process_fn=post_process_func,
+        loss_fn=flextrain_loss_func
+    )
+    model.func_pack = func_pack
     see_memory_usage(f"After Building Model", force=True)
     return model
 
@@ -61,7 +266,7 @@ def model_provider(pre_process=True, post_process=True):
     with deepspeed.zero.Init(sequence_data_parallel_group=mpu.get_sequence_data_parallel_group(),
                              remote_device=None if args.remote_device == 'none' else args.remote_device,
                              config_dict_or_path=args.deepspeed_config,
-                             enabled=args.zero_stage == 3,
+                             enabled=args.zero_stage == 3 or True,
                              mpu=mpu):
         if args.deepspeed and not args.no_pipeline_parallel:
             model = GPTModelPipe(
@@ -368,6 +573,9 @@ def git_ds_info():
 
 
 if __name__ == "__main__":
+    from torch.backends import cudnn
+    cudnn.benchmark = False
+    cudnn.deterministic = True
     git_ds_info()
     pretrain(train_valid_test_datasets_provider,
              model_provider,

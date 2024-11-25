@@ -226,6 +226,9 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler):
     """Save a model checkpoint."""
     args = get_args()
 
+    if args.flextrain:
+        raise NotImplementedError("Flextrain does not support loading checkpoints")
+
     # Only rank zero of the data parallel writes to the disk.
     if not args.deepspeed:
         model = unwrap_model(model)

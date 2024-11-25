@@ -27,6 +27,7 @@ from .utils import (
 from megatron.core.utils import safely_set_viewless_tensor_data
 
 import deepspeed
+import flextrain
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
@@ -172,6 +173,8 @@ _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
 
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
+    if get_args().flextrain:
+        return flextrain.checkpointing.get_cuda_rng_tracker()
     if deepspeed.checkpointing.is_configured():
         return deepspeed.checkpointing.get_cuda_rng_tracker()
     
@@ -195,6 +198,8 @@ def model_parallel_cuda_manual_seed(seed):
                               groups. This is used for example for dropout in
                               model parallel regions.
     """
+    if get_args().flextrain:
+        return flextrain.checkpointing.model_parallel_cuda_manual_seed(seed)
     if deepspeed.checkpointing.is_configured():
         return deepspeed.checkpointing.model_parallel_cuda_manual_seed(seed)
     

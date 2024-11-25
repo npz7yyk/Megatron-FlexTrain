@@ -11,6 +11,7 @@ from megatron import get_timers
 from megatron import get_tokenizer
 from megatron.core import mpu, tensor_parallel
 from megatron.core.enums import ModelType
+from megatron.core.pipeline_parallel.schedules import get_curr_data_iterator
 from megatron.data.gpt_dataset import build_train_valid_test_datasets
 from megatron.model import GPTModel, GPTModelPipe
 from megatron.training import pretrain
@@ -21,6 +22,8 @@ from megatron.arguments import core_transformer_config_from_args
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.accelerator.real_accelerator import get_accelerator
+import flextrain
+from flextrain import set_llm_func
 import os
 import subprocess
 
@@ -28,8 +31,181 @@ from torch import nn
 import torch.nn.functional as F
 
 
+# Link to target GPT model
+_GPT_MODEL: GPTModel = None
+
+
+def get_batch_func():
+    """ FlexTrain get_batch function """
+
+    # Get the data iterator and original batch data
+    data_iterator = get_curr_data_iterator()
+    batch_data = get_batch(data_iterator)
+
+    # Model inputs: input_ids, position_ids, attention_mask
+    model_inputs = (batch_data[0], batch_data[4], batch_data[3])
+
+    # Post-process inputs: labels
+    post_inputs = (batch_data[1], )
+
+    # Loss function inputs: loss_mask
+    loss_inputs = (batch_data[2], )
+
+    return model_inputs, post_inputs, loss_inputs
+
+
+def pre_process_func(model_inputs):
+    """ FlexTrain pre_process function """
+
+    # Unpack the model inputs
+    input_ids, position_ids, attention_mask = model_inputs
+
+    # Please refer to the original forward function for the following code
+
+    # Embedding layer
+    encoder_input = _GPT_MODEL.language_model.embedding(input_ids, position_ids)
+
+    # Viewless tensor.
+    from megatron.core.utils import make_viewless_tensor
+    hidden_states = make_viewless_tensor(
+        encoder_input,
+        requires_grad=True,
+        keep_graph=True,
+    )
+
+    return (hidden_states, []), (attention_mask,)
+
+
+def get_layer(index):
+    """ FlexTrain wrapped get_layer function """
+    return _GPT_MODEL.language_model.encoder.layers[index]
+
+
+def custom_forward(start, end):
+    """ FlexTrain custom forward function """
+
+    def forward(x, moe_losses, attention_mask):
+        for index in range(start, end):
+            layer = get_layer(index)
+            output = layer(x, attention_mask)
+            if isinstance(output, tuple):
+                x, moe_loss = output
+            else:
+                x = output
+                moe_loss = torch.tensor(
+                    0.0,
+                    device=x.device,
+                    dtype=x.dtype,
+                    requires_grad=True
+                )
+            moe_losses.append(moe_loss)
+        return (x, moe_losses)
+
+    return forward
+
+
+def post_process_func(passed_down, post_inputs):
+    """ FlexTrain post_process function """
+
+    # passed_down is the hidden_states and moe_losses
+    assert len(passed_down) == 2
+    hidden_states, moe_losses = passed_down
+
+    # post_inputs is the labels
+    assert len(post_inputs) == 1
+    labels = post_inputs[0]
+
+    # Final layer norm
+    hidden_states = _GPT_MODEL.language_model.encoder.final_layernorm(
+        hidden_states
+    )
+
+    # Conduct language model post-processing
+    from megatron.model.gpt_model import post_language_model_processing
+    lm_output = post_language_model_processing(
+        hidden_states, labels,
+        _GPT_MODEL.language_model.embedding.word_embeddings.weight,
+        _GPT_MODEL.parallel_output,
+        _GPT_MODEL.fp16_lm_cross_entropy
+    )
+
+    return lm_output, moe_losses
+
+
+def flextrain_loss_func(model_output, loss_inputs):
+    """ FlexTrain loss function """
+
+    args = get_args()
+
+    # Model output: output_tensor, other_losses
+    output_tensor, other_losses = model_output
+
+    # Model output kwargs: output_tensor
+    moe_losses = []
+    for moe_loss in other_losses:
+        if moe_loss is not None:
+            moe_losses.append(moe_loss)
+    moe_loss = sum(moe_losses) * args.moe_loss_coeff
+
+    # Loss function kwargs: mos_loss (mos not supported yet, a placeholder)
+    mos_loss = 0.0
+
+    # Loss inputs: loss_mask
+    loss_mask = loss_inputs[0]
+
+    # Return the loss
+    return loss_func(loss_mask, moe_loss, mos_loss, output_tensor)
+
+
+def flextrain_model_provider(pre_process=True, post_process=True):
+    """Build the model for FlexTrain optimization."""
+
+    # FlexTrain requires both pre-process and post-process to be enabled
+    assert pre_process and post_process
+
+    print_rank_0('building GPT model ...')
+    see_memory_usage("Before Building Model", force=True)
+    args = get_args()
+    config = core_transformer_config_from_args(args)
+    from megatron.model.transformer import ParallelTransformerLayer
+
+    # Custom parameter grouping function
+    # Copied from megatron/optimizer/__init__.py line 40
+    def param_grouping_func(name: str, param: torch.Tensor) -> int:
+        return name.endswith(".bias") or len(param.shape) == 1
+
+    with flextrain.Init(
+        layer_class=ParallelTransformerLayer,
+        num_layers=config.num_layers,
+        param_grouping_func=param_grouping_func
+    ):
+        model = GPTModel(
+            config=config,
+            num_tokentypes=0,
+            parallel_output=True,
+            pre_process=pre_process,
+            post_process=post_process
+        )
+        global _GPT_MODEL
+        _GPT_MODEL = model
+    set_llm_func(
+        get_layer=get_layer,
+        get_batch=get_batch_func,
+        pre_process=pre_process_func,
+        layer_forward=custom_forward,
+        post_process=post_process_func,
+        loss=flextrain_loss_func
+    )
+    see_memory_usage("After Building Model", force=True)
+    return model
+
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
+
+    args = get_args()
+    if args.flextrain:
+        return flextrain_model_provider(pre_process, post_process)
 
     print_rank_0('building GPT model ...')
     see_memory_usage(f"Before Building Model", force=True)
@@ -38,7 +214,7 @@ def model_provider(pre_process=True, post_process=True):
     config = core_transformer_config_from_args(args)
     with deepspeed.zero.Init(sequence_data_parallel_group=mpu.get_sequence_data_parallel_group(),
                              remote_device=None if args.remote_device == 'none' else args.remote_device,
-                             config_dict_or_path=args.deepspeed_config,
+                             config_dict_or_path=args.deepspeed_config_dict,
                              enabled=args.zero_stage == 3,
                              mpu=mpu):
         if args.deepspeed and not args.no_pipeline_parallel:

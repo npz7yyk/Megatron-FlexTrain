@@ -95,6 +95,8 @@ def get_forward_backward_func():
     collect_non_loss_data (optional, bool, default=False): TODO
 
     """
+    if get_args().flextrain:
+        return forward_backward_flextrain
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
@@ -299,6 +301,53 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     return input_tensor_grad
 
 
+_CURR_DATA_ITERATOR = None
+
+
+def get_curr_data_iterator():
+    assert _CURR_DATA_ITERATOR is not None, \
+        "Flextrain data iterator is not set."
+    return _CURR_DATA_ITERATOR
+
+
+def forward_backward_flextrain(*,
+                               forward_step_func,  # unused
+                               data_iterator: Union[Iterator, List[Iterator]],
+                               model,
+                               num_microbatches: int,  # unused
+                               seq_length: int,  # unused
+                               micro_batch_size: int,  # unused
+                               decoder_seq_length: int = None,  # unused
+                               forward_only: bool = False,
+                               collect_non_loss_data: bool = False,
+                               ):
+    """
+    Run forward and backward passes with FlexTrain optimizations.
+
+    Returns dictionary with losses.
+
+    See get_forward_backward_func() for argument details
+    """
+    # Set FlexTrain data iterator
+    global _CURR_DATA_ITERATOR
+    _CURR_DATA_ITERATOR = data_iterator
+
+    # Unwrap model
+    if isinstance(model, list):
+        model = model[0]
+
+    # Run forward and backward passes
+    forward_data_store = []
+    loss_rsts = model.train_iteration()
+
+    assert not collect_non_loss_data
+    for loss_rst in loss_rsts:
+        _, loss_reduced = loss_rst
+        forward_data_store.append(loss_reduced)
+
+    return forward_data_store
+
+
 def forward_backward_no_pipelining(*,
                                    forward_step_func,
                                    data_iterator: Union[Iterator, List[Iterator]],
@@ -342,24 +391,41 @@ def forward_backward_no_pipelining(*,
 
     model_type = get_model_type(model)
 
+    from flextrain.utils import print_rank_by_rank
+
     forward_data_store = []
     input_tensor, output_tensor_grad = None, None
+    import time
     with no_sync_func():
         for i in range(num_microbatches - 1):
+            t1 = time.time()
             output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                          input_tensor, forward_data_store, config, collect_non_loss_data)
+            t2 = time.time()
+            print_rank_by_rank(output_tensor)
+            print_rank_by_rank(f"forward_step time: {t2 - t1}")
             if not forward_only:
+                t1 = time.time()
                 backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config, model)
+                t2 = time.time()
+                print_rank_by_rank(f"backward_step time: {t2 - t1}")
     if args.deepspeed:
         model.set_gradient_accumulation_boundary(True)
 
     # Run computation for last microbatch out of context handler (want to
     # synchronize gradients).
+    t1 = time.time()
     output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                  input_tensor, forward_data_store, config, collect_non_loss_data)
+    t2 = time.time()
+    print_rank_by_rank(output_tensor)
+    print_rank_by_rank(f"forward_step time: {t2 - t1}")
 
     if not forward_only:
+        t1 = time.time()
         backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config, model)
+        t2 = time.time()
+        print_rank_by_rank(f"backward_step time: {t2 - t1}")
 
     return forward_data_store
 

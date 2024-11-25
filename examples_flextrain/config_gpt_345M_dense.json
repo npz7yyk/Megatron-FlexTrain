@@ -1,0 +1,32 @@
+{
+    "benchmark": false,
+    "batch_size": 128,
+    "micro_batch_size": 4,
+    "checkpoint_interval": 1,
+    "split_ratio": {
+        "checkpoint": [0.2, 0.3],
+        "gradient": [0.5, 0.5],
+        "parameter": [0.2, 0.3],
+        "optimizer": [0.0, 0.5],
+        "alpha": 0.25
+    },
+    "nvme_swap": {
+        "swap_dir": "/shared_ssd_storage/yikang/.cache",
+        "aio_block_size": 1048576,
+        "aio_queue_depth": 8,
+        "aio_thread_count": 4,
+        "aio_single_submit": false,
+        "aio_overlap_events": true
+    },
+    "mixed_precision": {
+        "device_dtype": "fp16",
+        "gradacc_dtype": "fp32",
+        "master_dtype": "fp32",
+        "dynamic_loss_scaling": true,
+        "initial_scale_power": 11,
+        "loss_scale_window": 1000,
+        "hysteresis": 2,
+        "consecutive_hysteresis": false,
+        "min_loss_scale": 1.0
+    }
+}

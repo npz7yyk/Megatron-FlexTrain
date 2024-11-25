@@ -21,6 +21,7 @@ from megatron.global_vars import set_global_variables
 from megatron.model.transformer import bias_dropout_add_fused_train
 from megatron.model.fused_bias_gelu import bias_gelu
 from megatron.utils import is_rank_0
+import flextrain
 from deepspeed.accelerator import get_accelerator
 import deepspeed
 from deepspeed.ops.op_builder.builder import OpBuilder
@@ -217,7 +218,9 @@ def _initialize_distributed():
             get_accelerator().set_device(device) # only do so when device_count > 0
 
     # Call the init process
-    if args.deepspeed or args.ds_inference:
+    if args.flextrain:
+        flextrain.init_distributed()
+    elif args.deepspeed or args.ds_inference:
         deepspeed.init_distributed()
     else:
         if not torch.distributed.is_initialized():

@@ -19,13 +19,13 @@ SEQ_LEN=2048
 # MIN_LR=6.0e-5
 
 ## GPT-3 Medium 350M
-MODEL_SIZE=0.35
-NUM_LAYERS=24
-HIDDEN_SIZE=1024
-NUM_ATTN_HEADS=16
-GLOBAL_BATCH_SIZE=16
-LR=3.0e-4
-MIN_LR=3.0e-5
+# MODEL_SIZE=0.35
+# NUM_LAYERS=24
+# HIDDEN_SIZE=1024
+# NUM_ATTN_HEADS=16
+# GLOBAL_BATCH_SIZE=16
+# LR=3.0e-4
+# MIN_LR=3.0e-5
 
 ## GPT-3 Large 760M
 # MODEL_SIZE=0.76
@@ -64,13 +64,13 @@ MIN_LR=3.0e-5
 # MIN_LR=1.2e-5
 
 ## GPT-3 13B
-# MODEL_SIZE=13
-# NUM_LAYERS=40
-# HIDDEN_SIZE=5120
-# NUM_ATTN_HEADS=40
-# GLOBAL_BATCH_SIZE=1024
-# LR=1.0e-4
-# MIN_LR=1.0e-5
+MODEL_SIZE=13
+NUM_LAYERS=40
+HIDDEN_SIZE=5120
+NUM_ATTN_HEADS=40
+GLOBAL_BATCH_SIZE=64
+LR=1.0e-4
+MIN_LR=1.0e-5
 
 ## GPT-3 175B
 # MODEL_SIZE=175
@@ -110,7 +110,7 @@ LR_DECAY_TOKENS=260000000000
 ### Parallelism configs
 ## Micro batch size per GPU
 ## Make sure that BATCH_SIZE <= GLOBAL_BATCH_SIZE*PP_SIZE*MP_SIZE/NUM_GPUS
-BATCH_SIZE=4
+BATCH_SIZE=8
 
 ## Model parallelism, 1 is no MP
 MP_SIZE=1
@@ -119,7 +119,7 @@ MP_SIZE=1
 ## Currently we don't support PP for MoE. To disable PP, set PP_SIZE
 ## to 1 and use the "--no-pipeline-parallel" arg.
 PP_SIZE=1
-NUM_GPUS=4
+NUM_GPUS=1
 ###############################################################################
 ### MoE configs
 ## Number of experts. EP_SIZE 1 means dense model without MoE
@@ -166,7 +166,7 @@ CL_TOKENS=$((${CL_TOKENS} * 1000000000))
 CL_STEP=$(( ${CL_TOKENS} / (${GLOBAL_BATCH_SIZE} * ${CL_AVG_SEQLEN}) ))
 ###############################################################################
 ### Misc configs
-LOG_INTERVAL=10
+LOG_INTERVAL=1
 EVAL_ITERS=10
 EVAL_INTERVAL=100
 SAVE_INTERVAL=1000
@@ -282,7 +282,10 @@ megatron_options=" \
         --clip-grad 0.0 \
         --hysteresis 2 \
         --num-workers 0 \
-        --fp16"
+        --cpu-optimizer \
+        --fp16 \
+        --use-flash-attn-v2
+    "
 
 if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
 megatron_options="${megatron_options} \
@@ -316,8 +319,11 @@ sed "s/CONFIG_BATCH_SIZE/${GLOBAL_BATCH_SIZE}/" ${template_json} \
 
 deepspeed_options=" \
 		    --deepspeed \
+            --zero-stage 3 \
 		    --deepspeed_config ${config_json} \
 		    --pipeline-model-parallel-size ${PP_SIZE}"
+
+# --checkpoint-in-cpu
 
 # Currently MoE is not compatible with pipeline parallel
 if [[ $EP_SIZE -gt 0 ]]; then

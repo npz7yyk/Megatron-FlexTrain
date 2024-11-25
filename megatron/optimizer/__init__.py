@@ -80,7 +80,15 @@ def get_megatron_optimizer(model,
         from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
         param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
 
-    if args.cpu_optimizer:
+    if args.flextrain:
+        assert args.optimizer == 'adam', 'FlexTrain only supports Adam'
+        from flextrain.ops.adam import FlexTrainAdam
+        optimizer = FlexTrainAdam(param_groups,
+                                  lr=args.lr,
+                                  weight_decay=args.weight_decay,
+                                  betas=(args.adam_beta1, args.adam_beta2),
+                                  eps=args.adam_eps)
+    elif args.cpu_optimizer:
         assert args.optimizer == 'adam', 'CPU offloading is for Adam'
         if args.cpu_torch_adam:
             cpu_adam_optimizer = torch.optim.AdamW
@@ -108,7 +116,7 @@ def get_megatron_optimizer(model,
             raise Exception('{} optimizer is not supported.'.format(
             args.optimizer))
 
-    if args.deepspeed:
+    if args.deepspeed or args.flextrain:
         return optimizer
 
     # Determine whether the params have main-grad field.

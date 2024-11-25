@@ -8,6 +8,7 @@ import json
 import os
 import torch
 import deepspeed
+import flextrain
 import types
 from packaging import version
 
@@ -50,6 +51,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         parser = extra_args_provider(parser)
 
     parser = deepspeed.add_config_arguments(parser)
+    parser = flextrain.add_config_arguments(parser)
 
     # Parse.
     if ignore_unknown_args:
@@ -387,7 +389,7 @@ def validate_args(args, defaults={}):
     # TODO: currently DeepSpeed seems to be incompatible with
     # async_tensor_model_parallel_allreduce thus temporarily disabling it.
     # Need further investigation.
-    if args.deepspeed:
+    if args.deepspeed or args.flextrain:
         args.async_tensor_model_parallel_allreduce = False
 
     if not args.use_dataset_only:

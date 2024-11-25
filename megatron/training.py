@@ -42,7 +42,8 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator, update_rotary_pos_emb
 from megatron.model.vision.knn_monitor import compute_feature_bank
 from megatron.arguments import core_transformer_config_from_args
-
+import flextrain
+from flextrain import init_flextrain_config
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.compression.compress import init_compression, redundancy_clean
@@ -83,6 +84,22 @@ def _create_ds_config_dict():
 
     return ds_config_dict
     
+
+def _create_ft_config_dict():
+    args = get_args()
+
+    # check if flextrain config is provided
+    assert args.flextrain_config is not None, \
+        "Flextrain config json file must be provided."
+
+    with open(args.flextrain_config, 'r', encoding='utf-8') as config_file:
+        ft_config_dict = json.load(config_file)
+
+    # Link the flextrain config to the args
+    args.flextrain_config = ft_config_dict
+
+    return ft_config_dict
+
 
 def pretrain(train_valid_test_dataset_provider,
              model_provider,
@@ -157,6 +174,10 @@ def pretrain(train_valid_test_dataset_provider,
                 args.deepspeed_config_dict["curriculum_learning"])
         if "compression_training" in args.deepspeed_config_dict:
             args.compression_training = True
+
+    if args.flextrain:
+        flextrain_config = _create_ft_config_dict()
+        init_flextrain_config(flextrain_config)
 
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
@@ -254,6 +275,7 @@ def pretrain(train_valid_test_dataset_provider,
                                    test_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train, test=True)
+
     return model
 
 
@@ -394,7 +416,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             sum([sum([p.ds_numel if hasattr(p,'ds_id') else p.nelement() for p in model_module.parameters()])
                  for model_module in model])), flush=True)
 
-    if args.deepspeed:
+    if args.deepspeed or args.flextrain:
         return model
 
     # GPU allocation.
@@ -566,7 +588,14 @@ def setup_model_and_optimizer(model_provider_func,
         # opt_param_scheduler is the old lr_scheduler plus weight decay scheduling
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
-    if args.deepspeed:
+    if args.flextrain:
+        print_rank_0("FlexTrain is enabled.")
+        model = flextrain.initialize(
+            model=model[0],
+            optimizer=optimizer
+        )
+        model = [model]
+    elif args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
         pp = mpu.get_pipeline_model_parallel_world_size()
         if args.data_efficiency_curriculum_learning and build_train_valid_test_datasets_provider is not None:
@@ -671,7 +700,7 @@ def train_step(forward_step_func, data_iterator,
         return {'lm loss' : loss}, skipped_iter, grad_norm, num_zeros_in_grad
 
     # Set grad to zero.
-    if not args.deepspeed:
+    if not args.deepspeed and not args.flextrain:
         if args.DDP_impl == 'local' and args.use_contiguous_buffers_in_local_ddp:
             for partition in model:
                 partition.zero_grad_buffer()
@@ -713,7 +742,7 @@ def train_step(forward_step_func, data_iterator,
         torch.cuda.empty_cache()
 
     # Reduce gradients.
-    if not args.deepspeed:
+    if not args.deepspeed and not args.flextrain:
         optimizer.reduce_model_grads(args, timers)
 
     # Vision gradients.
@@ -724,7 +753,15 @@ def train_step(forward_step_func, data_iterator,
 
     # Update parameters.
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    if args.deepspeed:
+    if args.flextrain:
+        increment = get_num_microbatches() * \
+                    args.micro_batch_size * \
+                    args.data_parallel_size
+        model[0].step()
+        model[0].register_post_step_function(
+            lambda: opt_param_scheduler.step(increment=increment)
+        )
+    elif args.deepspeed:
         increment = get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size
@@ -735,7 +772,7 @@ def train_step(forward_step_func, data_iterator,
     timers('optimizer').stop()
 
     # Gather params.
-    if not args.deepspeed and update_successful:
+    if not args.deepspeed and not args.flextrain and update_successful:
         optimizer.gather_model_params(args, timers)
 
     # Vision momentum.
@@ -745,7 +782,7 @@ def train_step(forward_step_func, data_iterator,
         unwrapped_model.update_momentum(args.curr_iteration)
 
     # Update learning rate.
-    if args.deepspeed:
+    if args.flextrain or args.deepspeed:
         skipped_iter = 0
         grad_norm = None
         num_zeros_in_grad = None
@@ -1149,7 +1186,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     # Translate args to core configuration
     config = core_transformer_config_from_args(args)
-    if not args.deepspeed:
+    if not args.deepspeed and not args.flextrain:
         config.grad_scale_func = optimizer.scale_loss
     config.timers = timers
 
@@ -1185,6 +1222,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler,
                        config)
+        torch.cuda.empty_cache()
         iteration += 1
         args.iteration = iteration
         new_samples = mpu.get_data_parallel_world_size() * \
@@ -1211,7 +1249,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             args.consumed_train_tokens += new_samples * args.actual_seq_length
         
         # Logging.
-        if args.deepspeed:
+        if args.flextrain:
+            loss_scale = model[0].loss_scale
+        elif args.deepspeed:
             if hasattr(model[0].optimizer, 'cur_scale'):
                 loss_scale = model[0].optimizer.cur_scale
             else:
@@ -1283,6 +1323,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             print_datetime('exiting program at iteration {}'.format(iteration))
             sys.exit()
 
+        if iteration == 1 + 10:
+            sys.exit()
 
     return iteration
 

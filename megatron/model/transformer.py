@@ -1885,7 +1885,6 @@ class ParallelTransformer(MegatronModule):
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
         else:
             rng_context = nullcontext()
-
         # Forward layers.
         with rng_context:
             # The fp8_autocast context manager is a no-op when enabled=True

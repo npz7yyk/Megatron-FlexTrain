@@ -3,7 +3,7 @@
 
 DIR=`pwd`
 DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
-BASE_DATA_PATH=datasets
+BASE_DATA_PATH=dataset
 DATASET=${BASE_DATA_PATH}/my-gpt2_text_document
 VOCAB_PATH=${BASE_DATA_PATH}/gpt2-vocab.json
 MERGE_PATH=${BASE_DATA_PATH}/gpt2-merges.txt
@@ -35,22 +35,21 @@ fi
 # 3D parallelism of training 
 TP=2
 PP=2
-DP=2
+DP=1
 SP=1
 WORLD_SIZE=$((TP*PP*DP*SP))
-GLOBAL_BATCH=16
+GLOBAL_BATCH=4
 MICRO_BATCH=$((GLOBAL_BATCH/WORLD_SIZE))
 TRAIN_ITERS=100000
 LR=6.0e-3
 MIN_LR=6.0e-4
 
 # 3D parallelism of checkpoint to load
-LOAD_TP=$TP
-LOAD_PP=$PP
-LOAD_DP=$DP
-LOAD_SP=$SP
-RUN_TAG="save"
-# RUN_TAG="ref_load${LOAD_TP}_${LOAD_PP}_${LOAD_DP}"
+LOAD_TP=2
+LOAD_PP=2
+LOAD_DP=2
+LOAD_SP=1
+RUN_TAG="uni_load${LOAD_TP}_${LOAD_PP}_${LOAD_DP}_${LOAD_SP}"
 
 EXP_DIR="z${ZERO_STAGE}_uni_ckpt" 
 CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${TP}_pp${PP}_dp${DP}_sp${SP}_${SIZE_TAG}
@@ -111,6 +110,7 @@ options=" \
         --save ${CHECKPOINT_PATH} \
         --load ${LOAD_CHECKPOINT_PATH} \
         --make-vocab-size-divisible-by 256 \
+        --universal-checkpoint \
 	--tensorboard-dir $LOG_DIR
         "
 
@@ -120,7 +120,6 @@ options="${options} \
         --zero-stage=${ZERO_STAGE} \
         --deepspeed-activation-checkpointing \
 "
-
 if [[ ${ZERO_STAGE} -gt 1 ]]; then
 options="${options} \
     --no-pipeline-parallel"

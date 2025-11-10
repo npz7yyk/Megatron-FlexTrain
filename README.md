@@ -1,11 +1,11 @@
 ## Latest News
-* [2023/07] Synced with [upstream](https://github.com/NVIDIA/Megatron-LM) over 1k commits, see [rebase folder for more details](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/rebase) in terms of features and updated performance.
+* [2023/07] Synced with [upstream](https://github.com/NVIDIA/Megatron-LM) over 1k commits, see [rebase folder for more details](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/rebase) in terms of features and updated performance.
 
 ## Megatron-DeepSpeed
 DeepSpeed version of NVIDIA's Megatron-LM that adds additional support for several features such as MoE model training, Curriculum Learning, 3D Parallelism, and others. The ```examples_deepspeed/``` folder includes example scripts about the features supported by DeepSpeed.
 
 ### Recent sync with NVIDIA/Megatron-LM
-In July 2023, we had a sync with the NVIDIA/Megatron-LM repo (where this repo is forked from) by git-merging 1100+ commits. Details can be found in the ```examples_deepspeed/rebase``` folder. Given the amount of merged commits, bugs can happen in the cases that we haven't tested, and your contribution (bug report, bug fix pull request) is highly welcomed. We also created a [backup branch](https://github.com/microsoft/Megatron-DeepSpeed/tree/before_rebase) which is the version before this sync. This backup branch is just for comparison tests and for temporary use when you need to debug the main branch. We do not plan to continue supporting the version before sync.
+In July 2023, we had a sync with the NVIDIA/Megatron-LM repo (where this repo is forked from) by git-merging 1100+ commits. Details can be found in the ```examples_deepspeed/rebase``` folder. Given the amount of merged commits, bugs can happen in the cases that we haven't tested, and your contribution (bug report, bug fix pull request) is highly welcomed. We also created a [backup branch](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/before_rebase) which is the version before this sync. This backup branch is just for comparison tests and for temporary use when you need to debug the main branch. We do not plan to continue supporting the version before sync.
 
 ### Run on Azure and AzureML
 To try out DeepSpeed on Azure, this fork of Megatron offers easy-to-use recipes and bash scripts. We strongly recommend to start with AzureML recipe in the ```examples_deepspeed/azureml``` folder. If you have a custom infrastructure (e.g. HPC clusters) or Azure VM based environment, please refer to the bash scripts in the ```examples_deepspeed/azure``` folder. 
@@ -131,7 +131,8 @@ python tools/preprocess_data.py \
        --output-prefix my-bert \
        --vocab-file bert-vocab.txt \
        --tokenizer-type BertWordPieceLowerCase \
-       --split-sentences
+       --split-sentences \
+       --workers 5
 </pre>
 
 The output will be two files named, in this case, `my-bert_text_sentence.bin` and `my-bert_text_sentence.idx`. The `--data-path` specified in later BERT training is the full path and new filename, but without the file extension.
@@ -150,7 +151,8 @@ python tools/preprocess_data.py \
        --dataset-impl mmap \
        --tokenizer-type GPT2BPETokenizer \
        --merge-file gpt2-merges.txt \
-       --append-eod
+       --append-eod \
+       --workers 5
 </pre>
 
 Here the output files are named `my-gpt2_text_document.bin` and `my-gpt2_text_document.idx`. As before, in GPT training, use the longer name without the extension as `--data-path`.

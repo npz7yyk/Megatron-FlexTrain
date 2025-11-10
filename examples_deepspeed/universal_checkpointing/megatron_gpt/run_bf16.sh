@@ -3,7 +3,7 @@
 
 DIR=`pwd`
 DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
-BASE_DATA_PATH=datasets
+BASE_DATA_PATH=dataset
 DATASET=${BASE_DATA_PATH}/my-gpt2_text_document
 VOCAB_PATH=${BASE_DATA_PATH}/gpt2-vocab.json
 MERGE_PATH=${BASE_DATA_PATH}/gpt2-merges.txt
@@ -17,12 +17,12 @@ ZERO_STAGE=1
 DTYPE="bf16"
 
 # Debug
-DEBUG_MODE=1 
+DEBUG_MODE=1
 if [[ $DEBUG_MODE == 1 ]]; then
         LAYERS=4
         HIDDEN=512
         SEQ=512
-        EXIT_INTERVAL=100
+        EXIT_INTERVAL=200
         SIZE_TAG="toy"
 else
         HIDDEN=1024
@@ -33,23 +33,24 @@ else
 fi  
 
 # 3D parallelism of training 
-TP=1
-PP=1
-DP=4
+TP=2
+PP=2
+DP=2
 SP=1
-WORLD_SIZE=$((TP*PP*DP))
-GLOBAL_BATCH=4
+WORLD_SIZE=$((TP*PP*DP*SP))
+GLOBAL_BATCH=16
 MICRO_BATCH=$((GLOBAL_BATCH/WORLD_SIZE))
 TRAIN_ITERS=100000
 LR=6.0e-3
 MIN_LR=6.0e-4
 
 # 3D parallelism of checkpoint to load
-LOAD_TP=1
-LOAD_PP=1
-LOAD_DP=4
-LOAD_SP=1
-RUN_TAG="uni_load${LOAD_TP}_${LOAD_PP}_${LOAD_DP}_${LOAD_SP}"
+LOAD_TP=$TP
+LOAD_PP=$PP
+LOAD_DP=$DP
+LOAD_SP=$SP
+RUN_TAG="save"
+# RUN_TAG="ref_load${LOAD_TP}_${LOAD_PP}_${LOAD_DP}"
 
 EXP_DIR="z${ZERO_STAGE}_uni_ckpt" 
 CHECKPOINT_PATH=${EXP_DIR}/checkpoints/gpt2/z${ZERO_STAGE}/$DTYPE/tp${TP}_pp${PP}_dp${DP}_sp${SP}_${SIZE_TAG}
@@ -110,10 +111,8 @@ options=" \
         --save ${CHECKPOINT_PATH} \
         --load ${LOAD_CHECKPOINT_PATH} \
         --make-vocab-size-divisible-by 256 \
-        --universal-checkpoint \
 	--tensorboard-dir $LOG_DIR
         "
-
 
 options="${options} \
         --deepspeed \
@@ -140,7 +139,7 @@ cat <<EOT > $CONFIG_JSON
     "enabled": true
   },
 
-    "data_types": {
+  "data_types": {
         "grad_accum_dtype": "fp32" 
   },
 
@@ -151,7 +150,7 @@ EOT
 WORKER_STR="--num_nodes 1 --num_gpus $WORLD_SIZE"
 run_cmd="deepspeed --master_port 29700 $WORKER_STR ${DIR}/pretrain_gpt.py $@ ${options}"
 
-
+echo ${options}
 echo ${run_cmd}
 eval ${run_cmd}
 

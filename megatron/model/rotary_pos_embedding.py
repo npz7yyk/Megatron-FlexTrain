@@ -1,3 +1,4 @@
+# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company.
 # coding=utf-8
 
 # The following code has been taken from https://github.com/NVIDIA/NeMo/blob/ \
@@ -8,14 +9,21 @@ import importlib.util
 import torch
 
 from torch import einsum, nn
+from deepspeed.accelerator import get_accelerator
 
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
+# sin, cos tensors cached for all devices
+cos_cached = None
+sin_cached = None
+
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, theta=10000):
         super().__init__()
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.inv_freq = inv_freq.to(get_accelerator().current_device_name())
+        self.theta = theta
+        # self.register_buffer('inv_freq', inv_freq)
         if importlib.util.find_spec('einops') is None:
             raise RuntimeError("einops is required for Rotary Embedding")
 
@@ -27,7 +35,9 @@ class RotaryEmbedding(nn.Module):
         emb = torch.cat((freqs, freqs), dim=-1)
         # emb [seq_length, .., dim]
         from einops import rearrange
-        return rearrange(emb, 'n d -> n 1 1 d')
+        base = rearrange(emb, 'n d -> n 1 1 d')
+        rope = [base.cos(), base.sin()]
+        return rope
 
 
 def _rotate_half(x):
@@ -47,10 +57,19 @@ def apply_rotary_pos_emb(t, freqs):
     check https://kexue.fm/archives/8265 for detailed formulas
     """
     rot_dim = freqs.shape[-1]
-    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+    t_pass = None
+    if t.shape[-1] != rot_dim:
+        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
+    global cos_cached, sin_cached
+    if cos_cached is None or sin_cached is None or t.shape[0] != cos_cached.shape[0]:
+        freqs_ = freqs[:t.shape[0]]
+        cos_cached = freqs_.cos().to(t.dtype)
+        sin_cached = freqs_.sin().to(t.dtype)
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs.cos().to(t.dtype)) + (_rotate_half(t) * freqs.sin().to(t.dtype))
+    t = (t * cos_cached) + (_rotate_half(t) * sin_cached)
+    if t_pass is None:
+        return t
     return torch.cat((t, t_pass), dim=-1)
